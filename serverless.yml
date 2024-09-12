@@ -1,0 +1,104 @@
+service: process-api-cnj
+
+frameworkVersion: '4.3.2'
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1
+
+functions:
+  processCNJ:
+    handler: index.handler
+    events:
+      - sqs:
+          arn: arn:aws:sqs:${self:provider.region}:${aws:accountId}:CNJProcessingQueue
+
+resources:
+  Resources:
+    CNJDataTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: CNJData
+        AttributeDefinitions:
+          - AttributeName: cnj
+            AttributeType: S
+        KeySchema:
+          - AttributeName: cnj
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 5
+          WriteCapacityUnits: 5
+
+    CNJProcessingQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: CNJProcessingQueue
+
+    CNJApi:
+      Type: AWS::ApiGateway::RestApi
+      Properties:
+        Name: CNJApi
+        Description: API para salvar e processar números CNJ
+        FailOnWarnings: true
+
+    CNJApiResource:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        ParentId:
+          Fn::GetAtt: 
+            - CNJApi
+            - RootResourceId
+        PathPart: process-cnj
+        RestApiId:
+          Ref: CNJApi
+
+    CNJApiPostMethod:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        AuthorizationType: NONE
+        HttpMethod: POST
+        ResourceId:
+          Ref: CNJApiResource
+        RestApiId:
+          Ref: CNJApi
+        Integration:
+          Type: AWS
+          IntegrationHttpMethod: POST
+          Uri:
+            Fn::Sub: arn:aws:apigateway:${AWS::Region}:sqs:path/${AWS::AccountId}/CNJProcessingQueue
+          Credentials:
+            Fn::GetAtt:
+              - CNJApiSQSRole
+              - Arn
+          PassthroughBehavior: WHEN_NO_MATCH
+          RequestTemplates:
+            application/json: |
+              {
+                "Action": "SendMessage",
+                "MessageBody": "$input.body"
+              }
+        MethodResponses:
+          - StatusCode: 200
+
+    CNJApiDeployment:
+      Type: AWS::ApiGateway::Deployment
+      DependsOn: CNJApiPostMethod
+      Properties:
+        RestApiId: !Ref CNJApi
+        StageName: prod
+
+    CNJApiSQSRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: CNJApiSQSRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: apigateway.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+          - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
