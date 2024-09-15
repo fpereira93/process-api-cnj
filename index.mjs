@@ -9,9 +9,9 @@ export const handler = async (event) => {
         const cnjNumber = messageBody.cnjNumber;
 
         const params = {
-            TableName: 'CNJRecords',
+            TableName: 'MyCNJTable',
             Item: {
-                cnj: { S: cnjNumber },
+                cnjNumber: { S: cnjNumber },
             }
         };
         const command = new PutItemCommand(params);

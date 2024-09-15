@@ -1,4 +1,4 @@
-service: process-api-cnj
+service: service-cnj-api
 
 frameworkVersion: '4.3.2'
 
@@ -6,99 +6,117 @@ provider:
   name: aws
   runtime: nodejs20.x
   region: us-east-1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+          Resource: arn:aws:dynamodb:us-east-1:${aws:accountId}:table/MyCNJTable
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+          Resource: arn:aws:sqs:us-east-1:${aws:accountId}:MyCNJQueue
 
 functions:
   processCNJ:
     handler: index.handler
     events:
       - sqs:
-          arn: arn:aws:sqs:${self:provider.region}:${aws:accountId}:CNJProcessingQueue
+          arn: arn:aws:sqs:us-east-1:${aws:accountId}:MyCNJQueue
 
 resources:
   Resources:
-    CNJDataTable:
+    MyCNJTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: CNJData
+        TableName: MyCNJTable
         AttributeDefinitions:
-          - AttributeName: cnj
+          - AttributeName: cnjNumber
             AttributeType: S
         KeySchema:
-          - AttributeName: cnj
+          - AttributeName: cnjNumber
             KeyType: HASH
         ProvisionedThroughput:
           ReadCapacityUnits: 5
           WriteCapacityUnits: 5
 
-    CNJProcessingQueue:
+    MyCNJQueue:
       Type: AWS::SQS::Queue
       Properties:
-        QueueName: CNJProcessingQueue
+        QueueName: MyCNJQueue
 
-    CNJApi:
-      Type: AWS::ApiGateway::RestApi
-      Properties:
-        Name: CNJApi
-        Description: API para salvar e processar números CNJ
-        FailOnWarnings: true
-
-    CNJApiResource:
-      Type: AWS::ApiGateway::Resource
-      Properties:
-        ParentId:
-          Fn::GetAtt: 
-            - CNJApi
-            - RootResourceId
-        PathPart: process-cnj
-        RestApiId:
-          Ref: CNJApi
-
-    CNJApiPostMethod:
-      Type: AWS::ApiGateway::Method
-      Properties:
-        AuthorizationType: NONE
-        HttpMethod: POST
-        ResourceId:
-          Ref: CNJApiResource
-        RestApiId:
-          Ref: CNJApi
-        Integration:
-          Type: AWS
-          IntegrationHttpMethod: POST
-          Uri:
-            Fn::Sub: arn:aws:apigateway:${AWS::Region}:sqs:path/${AWS::AccountId}/CNJProcessingQueue
-          Credentials:
-            Fn::GetAtt:
-              - CNJApiSQSRole
-              - Arn
-          PassthroughBehavior: WHEN_NO_MATCH
-          RequestTemplates:
-            application/json: |
-              {
-                "Action": "SendMessage",
-                "MessageBody": "$input.body"
-              }
-        MethodResponses:
-          - StatusCode: 200
-
-    CNJApiDeployment:
-      Type: AWS::ApiGateway::Deployment
-      DependsOn: CNJApiPostMethod
-      Properties:
-        RestApiId: !Ref CNJApi
-        StageName: prod
-
-    CNJApiSQSRole:
+    # Role para permitir ao API Gateway enviar mensagens à fila SQS
+    ApiGatewaySqsRole:
       Type: AWS::IAM::Role
       Properties:
-        RoleName: CNJApiSQSRole
         AssumeRolePolicyDocument:
-          Version: "2012-10-17"
+          Version: '2012-10-17'
           Statement:
             - Effect: Allow
               Principal:
                 Service: apigateway.amazonaws.com
               Action: sts:AssumeRole
-        ManagedPolicyArns:
-          - arn:aws:iam::aws:policy/AmazonSQSFullAccess
-          - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+        Policies:
+          - PolicyName: ApiGatewaySqsPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: sqs:SendMessage
+                  Resource: arn:aws:sqs:us-east-1:${aws:accountId}:MyCNJQueue
+
+    ApiGatewayRestApi:
+      Type: AWS::ApiGateway::RestApi
+      Properties: 
+        Name: "cnj-api"
+        EndpointConfiguration:
+          Types:
+            - REGIONAL  # Define o tipo de endpoint como Regional
+
+    ApiGatewayResource:
+      Type: AWS::ApiGateway::Resource
+      Properties: 
+        ParentId: 
+          Fn::GetAtt: 
+            - ApiGatewayRestApi
+            - RootResourceId
+        PathPart: "send-cnj"
+        RestApiId: 
+          Ref: ApiGatewayRestApi
+
+    ApiGatewayMethod:
+      Type: AWS::ApiGateway::Method
+      Properties: 
+        AuthorizationType: "NONE"
+        HttpMethod: POST
+        ResourceId: 
+          Ref: ApiGatewayResource
+        RestApiId: 
+          Ref: ApiGatewayRestApi
+        RequestParameters:
+          method.request.header.Content-Type: true  # Exige o cabeçalho Content-Type
+        Integration:
+          IntegrationHttpMethod: POST
+          Type: AWS
+          Credentials: !GetAtt ApiGatewaySqsRole.Arn  # Associa a Role criada ao API Gateway
+          Uri:
+            Fn::Sub: arn:aws:apigateway:${AWS::Region}:sqs:action/SendMessage&QueueUrl=https://sqs.${AWS::Region}.amazonaws.com/${aws:accountId}/MyCNJQueue
+          RequestParameters:
+            integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+          RequestTemplates:
+            application/json: |
+              Action=SendMessage&MessageBody=$input.body
+          IntegrationResponses:
+            - StatusCode: 200
+        MethodResponses:
+          - StatusCode: 200
+
+    ApiGatewayDeployment:
+      Type: AWS::ApiGateway::Deployment
+      Properties:
+        RestApiId: 
+          Ref: ApiGatewayRestApi
+        StageName: dev
+      DependsOn:
+        - ApiGatewayMethod
